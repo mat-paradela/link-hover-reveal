@@ -1,4 +1,4 @@
-import { Notice, Plugin, setIcon } from "obsidian";
+import { Editor, Notice, Plugin, setIcon } from "obsidian";
 import {
 	Decoration,
 	DecorationSet,
@@ -21,12 +21,19 @@ interface LinkData {
 	url: string;
 }
 
+interface LinkRange extends LinkData {
+	titleFrom: number;
+	titleTo: number;
+}
+
 function buildDecorations(view: EditorView): {
 	decorations: DecorationSet;
 	atomic: DecorationSet;
+	links: LinkRange[];
 } {
 	const deco = new RangeSetBuilder<Decoration>();
 	const atomic = new RangeSetBuilder<Decoration>();
+	const links: LinkRange[] = [];
 
 	for (const { from, to } of view.visibleRanges) {
 		const text = view.state.doc.sliceString(from, to);
@@ -61,10 +68,19 @@ function buildDecorations(view: EditorView): {
 			// Hide "](url)" — cursor hops over it, never lands inside.
 			deco.add(titleEnd, end, Decoration.replace({}));
 			atomic.add(titleEnd, end, Decoration.replace({}));
+
+			links.push({
+				from: start,
+				to: end,
+				titleFrom: titleStart,
+				titleTo: titleEnd,
+				title,
+				url,
+			});
 		}
 	}
 
-	return { decorations: deco.finish(), atomic: atomic.finish() };
+	return { decorations: deco.finish(), atomic: atomic.finish(), links };
 }
 
 /** Floating popup shown on hover: truncated URL + copy/open/edit actions. */
@@ -146,15 +162,28 @@ class LinkPopup {
 		cancelBtn.addEventListener("click", () => this.cancelEdit());
 	}
 
-	show(trigger: HTMLElement, data: LinkData) {
-		// Don't let hovering a different link hijack an in-progress edit.
+show(trigger: HTMLElement, data: LinkData) {
+		this.render(trigger.getBoundingClientRect(), data);
+	}
+
+	/** Same popup, positioned from doc coords instead of a hovered element —
+	 * used by the "Edit link at cursor" command, which doesn't require the
+	 * mouse at all. Opens straight into edit mode, since that's the whole
+	 * point of invoking it via shortcut. */
+	showAt(rect: { left: number; bottom: number }, data: LinkData) {
+		this.render(rect, data);
+		this.enterEditMode();
+	}
+
+	private render(rect: { left: number; bottom: number }, data: LinkData) {
+		// Don't let hovering a different link (or re-triggering the
+		// shortcut) hijack an in-progress edit.
 		if (this.isEditing) return;
 
 		this.cancelHide();
 		this.current = data;
 		this.renderDisplay();
 
-		const rect = trigger.getBoundingClientRect();
 		this.el.style.left = `${rect.left}px`;
 		this.el.style.top = `${rect.bottom + 4}px`;
 		this.el.style.display = "flex";
@@ -255,6 +284,10 @@ class LinkPopup {
 		if (!this.el.matches(":hover")) {
 			this.scheduleHide();
 		}
+		// The input this popup is destroying was focused — hand keyboard
+		// control back to the editor so the cursor is visible and arrow
+		// keys/typing keep working instead of scrolling the page.
+		this.view.focus();
 	}
 }
 
@@ -266,6 +299,7 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 	class {
 		decorations: DecorationSet;
 		atomic: DecorationSet;
+		links: LinkRange[];
 		popup: LinkPopup;
 		private view: EditorView;
 		private showTimer: number | null = null;
@@ -345,11 +379,38 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 			evt.stopPropagation();
 		};
 
+		/** Link (if any) whose title contains the cursor — used by the
+		 * "Edit link at cursor" command. */
+		findLinkAtCursor(): LinkRange | undefined {
+			const head = this.view.state.selection.main.head;
+			return this.links.find(
+				(l) => head >= l.titleFrom && head <= l.titleTo
+			);
+		}
+
+		/** Opens the same popup as hover, positioned under the given link,
+		 * based on cursor position instead of the mouse. Anchored to the
+		 * actual cursor position — coordsAtPos right at titleFrom sits on
+		 * the boundary of the hidden "[" widget and can resolve to null. */
+		openPopupFor(link: LinkRange) {
+			const pos = this.view.state.selection.main.head;
+			const rect =
+				this.view.coordsAtPos(pos) ?? this.view.coordsAtPos(link.titleFrom);
+			if (!rect) return;
+			this.popup.showAt(rect, {
+				from: link.from,
+				to: link.to,
+				title: link.title,
+				url: link.url,
+			});
+		}
+
 		constructor(view: EditorView) {
 			this.view = view;
 			const built = buildDecorations(view);
 			this.decorations = built.decorations;
 			this.atomic = built.atomic;
+			this.links = built.links;
 			this.popup = new LinkPopup(view);
 
 			view.dom.addEventListener("mouseover", this.onMouseOver);
@@ -363,6 +424,7 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 				const built = buildDecorations(update.view);
 				this.decorations = built.decorations;
 				this.atomic = built.atomic;
+				this.links = built.links;
 			}
 		}
 
@@ -393,6 +455,26 @@ const MOD_HELD_CLASS = "link-hover-reveal-mod-held";
 export default class LinkHoverRevealPlugin extends Plugin {
 	async onload() {
 		this.registerEditorExtension(Prec.highest(linkHoverRevealViewPlugin));
+
+		// A real Obsidian command (not a CM6 keymap) so it shows up in
+		// Settings → Hotkeys and users can freely rebind it. CM6 keymaps
+		// can't reliably win against Obsidian's own built-in hotkeys
+		// (e.g. the default Mod-K is already "insert link"), so this uses
+		// a separate default combo instead of fighting over that one.
+		this.addCommand({
+			id: "edit-link-at-cursor",
+			name: "Edit link at cursor",
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "k" }],
+			editorCheckCallback: (checking, editor) => {
+				const cmView = (editor as Editor & { cm?: EditorView }).cm;
+				const instance = cmView?.plugin(linkHoverRevealViewPlugin);
+				const link = instance?.findLinkAtCursor();
+				if (!instance || !link) return false;
+
+				if (!checking) instance.openPopupFor(link);
+				return true;
+			},
+		});
 
 		// Toggle a body-level class while Cmd/Ctrl is held so hovered link
 		// titles show a pointer cursor only while the modifier is active.

@@ -11,7 +11,9 @@ By default, Obsidian's Live Preview expands a markdown link to its raw `[text](u
 - Links render as plain title text, e.g. `[My bookmark title](https://example.com)` shows as just `My bookmark title`.
 - The title is real, editable text — move the cursor through it and edit words freely with the keyboard.
 - The `[`, `]`, `(url)` syntax stays hidden at all times; the cursor skips over it instead of landing inside, so navigating between lines never expands a link.
-- Hover a link to see a small popup with the (truncated) URL and three actions: copy, open, and edit.
+- Clicking the title places the cursor, like normal text; **Cmd/Ctrl-click** opens the link.
+- Hover a link (after a brief delay) to see a small popup below it with the truncated URL and three actions: copy, open, and edit.
+- **Edit link at cursor** command (default hotkey `Cmd/Ctrl+Shift+K`, rebindable in Settings → Hotkeys) opens the same popup straight into edit mode, from the keyboard, no mouse needed.
 
 ## Installation
 

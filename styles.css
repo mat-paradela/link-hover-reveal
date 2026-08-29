@@ -1,0 +1,50 @@
+.link-hover-reveal-title {
+	color: var(--link-color);
+	text-decoration: underline;
+	cursor: text;
+}
+
+body.link-hover-reveal-mod-held .link-hover-reveal-title {
+	cursor: pointer;
+}
+
+.link-hover-reveal-popup {
+	position: fixed;
+	z-index: var(--layer-popover, 70);
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 4px 6px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 6px);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-smaller);
+}
+
+.link-hover-reveal-popup-url {
+	max-width: 260px;
+	padding: 0 4px;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+}
+
+.link-hover-reveal-popup-url.is-editing {
+	max-width: none;
+}
+
+.link-hover-reveal-popup-url input {
+	width: 260px;
+	padding: 2px 4px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.link-hover-reveal-popup-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}

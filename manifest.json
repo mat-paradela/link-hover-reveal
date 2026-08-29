@@ -1,0 +1,9 @@
+{
+	"id": "link-hover-reveal",
+	"name": "Link Hover Reveal",
+	"version": "0.2.1",
+	"minAppVersion": "1.0.0",
+	"description": "Keeps markdown link titles as real, editable text while permanently hiding the [ ] ( ) syntax. Hover a link to copy, open, or edit its URL in a small popup.",
+	"author": "Matías Paradela",
+	"isDesktopOnly": false
+}

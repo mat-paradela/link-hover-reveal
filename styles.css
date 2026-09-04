@@ -8,6 +8,12 @@ body.link-hover-reveal-mod-held .link-hover-reveal-title {
 	cursor: pointer;
 }
 
+/* The "[" and "]" while revealed near the cursor — styled like Obsidian's
+ * own dimmed markdown syntax markers (e.g. cm-formatting), not plain text. */
+.link-hover-reveal-bracket {
+	color: var(--text-faint);
+}
+
 .link-hover-reveal-popup {
 	position: fixed;
 	z-index: var(--layer-popover, 70);

@@ -8,14 +8,19 @@ import {
 	ViewUpdate,
 	keymap,
 } from "@codemirror/view";
-import { Prec, RangeSetBuilder } from "@codemirror/state";
+import {
+	EditorSelection,
+	EditorState,
+	Prec,
+	RangeSetBuilder,
+	Text,
+} from "@codemirror/state";
 
 // Matches markdown links, e.g. [My bookmark title](https://example.com)
 // Negative lookbehind excludes image embeds: ![alt](url)
 const LINK_RE = /(?<!!)\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
 
 const TITLE_CLASS = "link-hover-reveal-title";
-const BRACKET_CLASS = "link-hover-reveal-bracket";
 
 interface LinkData {
 	from: number;
@@ -28,6 +33,87 @@ interface LinkRange extends LinkData {
 	titleFrom: number;
 	titleTo: number;
 }
+
+function toLinkRange(match: RegExpExecArray, offset: number): LinkRange {
+	const [raw, title, url] = match;
+	const from = offset + match.index;
+	const titleFrom = from + 1; // right after "["
+	return {
+		from,
+		to: from + raw.length,
+		titleFrom,
+		titleTo: titleFrom + title.length, // right before "]"
+		title,
+		url,
+	};
+}
+
+/** Every link on the line holding `pos`. Link syntax can't span a line break
+ * (the title rejects "\n", the url rejects whitespace), so one line is an
+ * exhaustive scan — cheap enough to redo on every keystroke, and always in
+ * sync with the state it was handed, unlike the view plugin's cached list. */
+function linksOnLine(doc: Text, pos: number): LinkRange[] {
+	const line = doc.lineAt(pos);
+	const found: LinkRange[] = [];
+	LINK_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = LINK_RE.exec(line.text))) {
+		found.push(toLinkRange(match, line.from));
+	}
+	return found;
+}
+
+/** The single document position that may hold the cursor at a given spot on
+ * screen.
+ *
+ * Hidden syntax takes up no width, so several positions paint at the same
+ * pixel: the two sides of "[" (from / titleFrom) are one spot, and so is
+ * everything from titleTo to the end of the link (the "](url)" run). If the
+ * cursor can rest on more than one of them, an arrow press moves it in the
+ * document but not on screen, and Backspace eats a character nobody can see.
+ *
+ * So each spot keeps exactly one legal position, and it's the one *outside*
+ * the link. That's what makes typing next to a link behave like ordinary
+ * text — which matters most right after writing one, since the cursor is
+ * sitting at `to` the moment ")" completes it. The trade-off is that the
+ * title's own edges belong to the surrounding text: text typed there lands
+ * outside the link, so a title can't be extended by typing at its end (edit
+ * it from the inside, or through the popup). */
+function canonicalPos(doc: Text, pos: number): number {
+	for (const l of linksOnLine(doc, pos)) {
+		if (pos === l.titleFrom) return l.from;
+		if (pos >= l.titleTo && pos < l.to) return l.to;
+	}
+	return pos;
+}
+
+/** Holds every cursor on a canonical position, whatever put it there —
+ * mouse clicks, vertical arrows, Home/End, undo, other plugins. The key
+ * handlers below only ever aim at canonical positions, so this never fights
+ * them. Non-empty ranges are left alone: a selection covering hidden syntax
+ * is unambiguous about what it'll delete, and trimming its ends would fight
+ * shift-selection. */
+const canonicalCursor = EditorState.transactionFilter.of((tr) => {
+	const sel = tr.newSelection;
+	let moved = false;
+	const ranges = sel.ranges.map((r) => {
+		if (!r.empty) return r;
+		const pos = canonicalPos(tr.newDoc, r.head);
+		if (pos === r.head) return r;
+		moved = true;
+		return EditorSelection.cursor(pos, r.assoc, undefined, r.goalColumn);
+	});
+	if (!moved) return tr;
+	// "sequential" so these positions are read against the transaction's own
+	// document rather than being mapped through its changes a second time.
+	return [
+		tr,
+		{
+			selection: EditorSelection.create(ranges, sel.mainIndex),
+			sequential: true,
+		},
+	];
+});
 
 function buildDecorations(view: EditorView): {
 	decorations: DecorationSet;
@@ -43,155 +129,114 @@ function buildDecorations(view: EditorView): {
 		LINK_RE.lastIndex = 0;
 		let match: RegExpExecArray | null;
 		while ((match = LINK_RE.exec(text))) {
-			const [raw, title, url] = match;
-			const start = from + match.index;
-			const end = start + raw.length;
-			const titleStart = start + 1; // right after "["
-			const titleEnd = titleStart + title.length; // right before "]"
-			const bracketEnd = titleEnd + 1; // right after "]"
+			const l = toLinkRange(match, from);
 
-			// Keep the "[" and "]" hidden and atomic by default — but the
-			// moment the cursor is anywhere in or touching the title,
-			// reveal both as plain text instead (the "(url)" part stays
-			// hidden always; only the brackets mirror each other). This is
-			// the same "hidden until the cursor arrives" pattern Obsidian's
-			// own live preview uses for [[wikilinks]]: it removes all the
-			// ambiguity around navigating or deleting a character that
-			// isn't actually rendered, because while you're near it, it
-			// *is* rendered.
-			//
-			// The range is `start`..`end` — the whole link, brackets and
-			// hidden url included, not just up to the title itself — so
-			// both brackets are already visible the moment the cursor
-			// lands right next to the link from either outside edge,
-			// before it actually crosses over. `end` (not `bracketEnd`)
-			// matters here: it's what makes resting right after the whole
-			// link — on the far side of the always-hidden "(url)" — count
-			// too, mirroring resting right before it on the near side.
-			const cursorInTitle = view.state.selection.ranges.some(
-				(r) => r.to >= start && r.from <= end
-			);
-			if (cursorInTitle) {
-				deco.add(start, titleStart, Decoration.mark({ class: BRACKET_CLASS }));
-			} else {
-				deco.add(start, titleStart, Decoration.replace({}));
-				atomic.add(start, titleStart, Decoration.replace({}));
-			}
+			// The syntax is hidden unconditionally — it never reappears
+			// under the cursor. Everything that keeps that honest (arrows
+			// that skip it, deletes that can't touch it) lives in
+			// canonicalPos and the keymap below.
+			deco.add(l.from, l.titleFrom, Decoration.replace({}));
+			atomic.add(l.from, l.titleFrom, Decoration.replace({}));
 
 			// The title stays real, editable text — just styled.
 			deco.add(
-				titleStart,
-				titleEnd,
+				l.titleFrom,
+				l.titleTo,
 				Decoration.mark({
 					class: TITLE_CLASS,
 					attributes: {
-						"data-lhr-from": String(start),
-						"data-lhr-to": String(end),
-						"data-lhr-title": title,
-						"data-lhr-url": url,
+						"data-lhr-from": String(l.from),
+						"data-lhr-to": String(l.to),
+						"data-lhr-title": l.title,
+						"data-lhr-url": l.url,
 					},
 				})
 			);
 
-			if (cursorInTitle) {
-				deco.add(titleEnd, bracketEnd, Decoration.mark({ class: BRACKET_CLASS }));
-			} else {
-				deco.add(titleEnd, bracketEnd, Decoration.replace({}));
-				atomic.add(titleEnd, bracketEnd, Decoration.replace({}));
-			}
+			// "](url)" as one range, not a bracket plus a url: atomic-range
+			// correction only pushes the cursor out of positions strictly
+			// *inside* a range, so splitting it would leave the seam between
+			// the two halves as a reachable, invisible resting spot.
+			deco.add(l.titleTo, l.to, Decoration.replace({}));
+			atomic.add(l.titleTo, l.to, Decoration.replace({}));
 
-			// Hide "(url)" — always, regardless of cursor position. The
-			// cursor hops over it, never lands inside.
-			deco.add(bracketEnd, end, Decoration.replace({}));
-			atomic.add(bracketEnd, end, Decoration.replace({}));
-
-			links.push({
-				from: start,
-				to: end,
-				titleFrom: titleStart,
-				titleTo: titleEnd,
-				title,
-				url,
-			});
+			links.push(l);
 		}
 	}
 
 	return { decorations: deco.finish(), atomic: atomic.finish(), links };
 }
 
-/** The trailing "(url)" run is many characters wide, so by default,
- * crossing it with a single arrow press can land the cursor stuck inside
- * (atomic-range correction bounces it around instead of clearing the whole
- * run). This jumps straight from one side to the other in one motion.
+/** One arrow press, one visible move.
  *
- * Note the boundary is `titleTo + 1` (right after "]"), not `titleTo` —
- * the "]" itself mirrors the "[" and is revealed/real whenever the cursor
- * is anywhere in the title (see buildDecorations), so it's already a
- * normal, single-step crossing; only "(url)" past it stays always hidden.
- *
- * The leading "[" doesn't need any of this — it's exactly 1 hidden
- * character, so a plain arrow press already crosses it in one
- * deterministic step, same as this function would produce anyway. The one
- * thing that step can't avoid is *looking* like nothing happened, since
- * the "[" renders as zero width either way — but "fixing" that would mean
- * also swallowing whatever real character sits next to it (e.g. a space),
- * which is worse than the harmless dead-looking press it'd be trying to
- * avoid. */
+ * At a link's edges the default single-character step lands on hidden
+ * syntax: same pixel, so the press looks dead, and canonicalPos would just
+ * bounce it back where it came from. Atomic ranges handle this on their own
+ * for the long "](url)" run — but only because the correction needs a
+ * position strictly inside a range, and the 1-char "[" has no inside. So
+ * both edges get an explicit target instead: the far side of the nearest
+ * character that's actually on screen. */
 function arrowSkip(view: EditorView, forward: boolean): boolean {
-	const links = view.plugin(linkHoverRevealViewPlugin)?.links;
-	if (!links) return false;
 	const { head, empty } = view.state.selection.main;
 	if (!empty) return false;
 
-	for (const l of links) {
-		const bracketEnd = l.titleTo + 1;
-		if (forward && head === bracketEnd) {
-			view.dispatch({ selection: { anchor: l.to } });
-			return true;
-		}
-		if (!forward && head === l.to) {
-			view.dispatch({ selection: { anchor: bracketEnd } });
-			return true;
-		}
+	for (const l of linksOnLine(view.state.doc, head)) {
+		// Leaving "from" rightwards, or "to" leftwards, means crossing
+		// hidden syntax plus exactly one title character.
+		const target =
+			forward && head === l.from
+				? l.titleFrom + 1
+				: !forward && head === l.to
+					? l.titleTo - 1
+					: null;
+		if (target === null) continue;
+
+		view.dispatch({
+			selection: { anchor: canonicalPos(view.state.doc, target) },
+			scrollIntoView: true,
+			userEvent: "select",
+		});
+		return true;
 	}
 	return false;
 }
 
-/** Backspace/Delete at a hidden boundary must never eat the invisible
- * markdown syntax (that silently corrupts the link) — it should act on the
- * nearest visible title character instead, same as it would look to the
- * user if the syntax weren't there at all.
- *
- * Same `titleTo + 1` note as arrowSkip above: the "]" itself is real
- * whenever the cursor is in the title, so deleting it there is a normal,
- * correct delete — only the always-hidden "(url)" past it needs guarding. */
+/** Backspace/Delete at a link edge must never eat the invisible markdown
+ * syntax — that breaks the link with nothing on screen to show for it, and
+ * retyping the character doesn't put it back. The cursor there sits at the
+ * same pixel as the title's first or last character, so that's what gets
+ * deleted: exactly what it looks like from the outside. */
 function deleteSkip(view: EditorView, forward: boolean): boolean {
-	const links = view.plugin(linkHoverRevealViewPlugin)?.links;
-	if (!links) return false;
 	const { head, empty } = view.state.selection.main;
 	if (!empty) return false;
 
-	// Note: nothing to do here for the leading "[" — it's only ever hidden
-	// while the cursor is nowhere near it (see buildDecorations' reveal
-	// logic), so Backspace/Delete can never land on it silently. Once
-	// revealed it's plain text and default deletion is exactly right.
-	for (const l of links) {
-		const bracketEnd = l.titleTo + 1;
-		if (!forward && head > bracketEnd && head <= l.to) {
-			// Cursor is inside/after the hidden "(url)" — delete the last
-			// visible title character instead of the real "(" underneath.
+	for (const l of linksOnLine(view.state.doc, head)) {
+		const atEnd = !forward && head === l.to;
+		const atStart = forward && head === l.from;
+		if (!atEnd && !atStart) continue;
+
+		// Down to the last visible character: removing it would leave
+		// "[](url)", which no longer matches as a link and so springs back
+		// into view as raw syntax. Take the whole link instead — on screen
+		// that's the same thing, the last of its text going away.
+		if (l.title.length === 1) {
 			view.dispatch({
-				changes: { from: l.titleTo - 1, to: l.titleTo },
-				selection: { anchor: l.titleTo - 1 },
+				changes: { from: l.from, to: l.to },
+				selection: { anchor: l.from },
+				userEvent: forward ? "delete.forward" : "delete.backward",
 			});
 			return true;
 		}
-		if (forward && head >= bracketEnd && head < l.to) {
-			// Cursor is inside the hidden "(url)" — nothing visible to
-			// delete, just land back at a real boundary instead of eating it.
-			view.dispatch({ selection: { anchor: l.to } });
-			return true;
-		}
+
+		const at = atEnd ? l.titleTo - 1 : l.titleFrom;
+		view.dispatch({
+			changes: { from: at, to: at + 1 },
+			// Stay on the edge it was on — the link just got one character
+			// shorter, so keeping backspace held down keeps eating the title.
+			selection: { anchor: atEnd ? l.to - 1 : l.from },
+			userEvent: forward ? "delete.forward" : "delete.backward",
+		});
+		return true;
 	}
 	return false;
 }
@@ -503,9 +548,10 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 		 * "Edit link at cursor" command. */
 		findLinkAtCursor(): LinkRange | undefined {
 			const head = this.view.state.selection.main.head;
-			return this.links.find(
-				(l) => head >= l.titleFrom && head <= l.titleTo
-			);
+			// `from`/`to`, not the title's own bounds: the cursor resting
+			// against either edge of the link is painted right next to the
+			// title text, so that's "at" the link from the user's side.
+			return this.links.find((l) => head >= l.from && head <= l.to);
 		}
 
 		/** Opens the same popup as hover, positioned under the given link,
@@ -540,14 +586,7 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 		}
 
 		update(update: ViewUpdate) {
-			// selectionSet is included so the "[" reveal-near-cursor
-			// decoration (see buildDecorations) tracks the cursor moving
-			// in and out of a title, not just doc/viewport changes.
-			if (
-				update.docChanged ||
-				update.viewportChanged ||
-				update.selectionSet
-			) {
+			if (update.docChanged || update.viewportChanged) {
 				const built = buildDecorations(update.view);
 				this.decorations = built.decorations;
 				this.atomic = built.atomic;
@@ -584,6 +623,7 @@ export default class LinkHoverRevealPlugin extends Plugin {
 		this.registerEditorExtension([
 			Prec.highest(linkHoverRevealViewPlugin),
 			Prec.highest(keymap.of(linkBoundaryKeymap)),
+			canonicalCursor,
 		]);
 
 		// A real Obsidian command (not a CM6 keymap) so it shows up in

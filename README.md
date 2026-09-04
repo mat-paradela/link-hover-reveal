@@ -33,10 +33,19 @@ By default, Obsidian's Live Preview expands a markdown link to its raw `[text](u
 
 ```bash
 npm install --legacy-peer-deps
-node esbuild.config.mjs production
+npm run build
 ```
 
 Then copy `main.js`, `manifest.json`, and `styles.css` into your vault's plugin folder as above.
+
+To build and copy in one step, point `npm run deploy` at your vault — either
+via the `OBSIDIAN_PLUGIN_DIR` environment variable, or by writing the plugin
+folder path into a `.deploy-target` file (git-ignored):
+
+```bash
+echo "<your-vault>/.obsidian/plugins/link-hover-reveal" > .deploy-target
+npm run deploy
+```
 
 ## License
 

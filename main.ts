@@ -3,8 +3,10 @@ import {
 	Decoration,
 	DecorationSet,
 	EditorView,
+	KeyBinding,
 	ViewPlugin,
 	ViewUpdate,
+	keymap,
 } from "@codemirror/view";
 import { Prec, RangeSetBuilder } from "@codemirror/state";
 
@@ -13,6 +15,7 @@ import { Prec, RangeSetBuilder } from "@codemirror/state";
 const LINK_RE = /(?<!!)\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
 
 const TITLE_CLASS = "link-hover-reveal-title";
+const BRACKET_CLASS = "link-hover-reveal-bracket";
 
 interface LinkData {
 	from: number;
@@ -45,10 +48,35 @@ function buildDecorations(view: EditorView): {
 			const end = start + raw.length;
 			const titleStart = start + 1; // right after "["
 			const titleEnd = titleStart + title.length; // right before "]"
+			const bracketEnd = titleEnd + 1; // right after "]"
 
-			// Hide the "[" — cursor hops over it, never lands inside.
-			deco.add(start, titleStart, Decoration.replace({}));
-			atomic.add(start, titleStart, Decoration.replace({}));
+			// Keep the "[" and "]" hidden and atomic by default — but the
+			// moment the cursor is anywhere in or touching the title,
+			// reveal both as plain text instead (the "(url)" part stays
+			// hidden always; only the brackets mirror each other). This is
+			// the same "hidden until the cursor arrives" pattern Obsidian's
+			// own live preview uses for [[wikilinks]]: it removes all the
+			// ambiguity around navigating or deleting a character that
+			// isn't actually rendered, because while you're near it, it
+			// *is* rendered.
+			//
+			// The range is `start`..`end` — the whole link, brackets and
+			// hidden url included, not just up to the title itself — so
+			// both brackets are already visible the moment the cursor
+			// lands right next to the link from either outside edge,
+			// before it actually crosses over. `end` (not `bracketEnd`)
+			// matters here: it's what makes resting right after the whole
+			// link — on the far side of the always-hidden "(url)" — count
+			// too, mirroring resting right before it on the near side.
+			const cursorInTitle = view.state.selection.ranges.some(
+				(r) => r.to >= start && r.from <= end
+			);
+			if (cursorInTitle) {
+				deco.add(start, titleStart, Decoration.mark({ class: BRACKET_CLASS }));
+			} else {
+				deco.add(start, titleStart, Decoration.replace({}));
+				atomic.add(start, titleStart, Decoration.replace({}));
+			}
 
 			// The title stays real, editable text — just styled.
 			deco.add(
@@ -65,9 +93,17 @@ function buildDecorations(view: EditorView): {
 				})
 			);
 
-			// Hide "](url)" — cursor hops over it, never lands inside.
-			deco.add(titleEnd, end, Decoration.replace({}));
-			atomic.add(titleEnd, end, Decoration.replace({}));
+			if (cursorInTitle) {
+				deco.add(titleEnd, bracketEnd, Decoration.mark({ class: BRACKET_CLASS }));
+			} else {
+				deco.add(titleEnd, bracketEnd, Decoration.replace({}));
+				atomic.add(titleEnd, bracketEnd, Decoration.replace({}));
+			}
+
+			// Hide "(url)" — always, regardless of cursor position. The
+			// cursor hops over it, never lands inside.
+			deco.add(bracketEnd, end, Decoration.replace({}));
+			atomic.add(bracketEnd, end, Decoration.replace({}));
 
 			links.push({
 				from: start,
@@ -82,6 +118,90 @@ function buildDecorations(view: EditorView): {
 
 	return { decorations: deco.finish(), atomic: atomic.finish(), links };
 }
+
+/** The trailing "(url)" run is many characters wide, so by default,
+ * crossing it with a single arrow press can land the cursor stuck inside
+ * (atomic-range correction bounces it around instead of clearing the whole
+ * run). This jumps straight from one side to the other in one motion.
+ *
+ * Note the boundary is `titleTo + 1` (right after "]"), not `titleTo` —
+ * the "]" itself mirrors the "[" and is revealed/real whenever the cursor
+ * is anywhere in the title (see buildDecorations), so it's already a
+ * normal, single-step crossing; only "(url)" past it stays always hidden.
+ *
+ * The leading "[" doesn't need any of this — it's exactly 1 hidden
+ * character, so a plain arrow press already crosses it in one
+ * deterministic step, same as this function would produce anyway. The one
+ * thing that step can't avoid is *looking* like nothing happened, since
+ * the "[" renders as zero width either way — but "fixing" that would mean
+ * also swallowing whatever real character sits next to it (e.g. a space),
+ * which is worse than the harmless dead-looking press it'd be trying to
+ * avoid. */
+function arrowSkip(view: EditorView, forward: boolean): boolean {
+	const links = view.plugin(linkHoverRevealViewPlugin)?.links;
+	if (!links) return false;
+	const { head, empty } = view.state.selection.main;
+	if (!empty) return false;
+
+	for (const l of links) {
+		const bracketEnd = l.titleTo + 1;
+		if (forward && head === bracketEnd) {
+			view.dispatch({ selection: { anchor: l.to } });
+			return true;
+		}
+		if (!forward && head === l.to) {
+			view.dispatch({ selection: { anchor: bracketEnd } });
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Backspace/Delete at a hidden boundary must never eat the invisible
+ * markdown syntax (that silently corrupts the link) — it should act on the
+ * nearest visible title character instead, same as it would look to the
+ * user if the syntax weren't there at all.
+ *
+ * Same `titleTo + 1` note as arrowSkip above: the "]" itself is real
+ * whenever the cursor is in the title, so deleting it there is a normal,
+ * correct delete — only the always-hidden "(url)" past it needs guarding. */
+function deleteSkip(view: EditorView, forward: boolean): boolean {
+	const links = view.plugin(linkHoverRevealViewPlugin)?.links;
+	if (!links) return false;
+	const { head, empty } = view.state.selection.main;
+	if (!empty) return false;
+
+	// Note: nothing to do here for the leading "[" — it's only ever hidden
+	// while the cursor is nowhere near it (see buildDecorations' reveal
+	// logic), so Backspace/Delete can never land on it silently. Once
+	// revealed it's plain text and default deletion is exactly right.
+	for (const l of links) {
+		const bracketEnd = l.titleTo + 1;
+		if (!forward && head > bracketEnd && head <= l.to) {
+			// Cursor is inside/after the hidden "(url)" — delete the last
+			// visible title character instead of the real "(" underneath.
+			view.dispatch({
+				changes: { from: l.titleTo - 1, to: l.titleTo },
+				selection: { anchor: l.titleTo - 1 },
+			});
+			return true;
+		}
+		if (forward && head >= bracketEnd && head < l.to) {
+			// Cursor is inside the hidden "(url)" — nothing visible to
+			// delete, just land back at a real boundary instead of eating it.
+			view.dispatch({ selection: { anchor: l.to } });
+			return true;
+		}
+	}
+	return false;
+}
+
+const linkBoundaryKeymap: readonly KeyBinding[] = [
+	{ key: "ArrowLeft", run: (view) => arrowSkip(view, false) },
+	{ key: "ArrowRight", run: (view) => arrowSkip(view, true) },
+	{ key: "Backspace", run: (view) => deleteSkip(view, false) },
+	{ key: "Delete", run: (view) => deleteSkip(view, true) },
+];
 
 /** Floating popup shown on hover: truncated URL + copy/open/edit actions. */
 class LinkPopup {
@@ -420,7 +540,14 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 		}
 
 		update(update: ViewUpdate) {
-			if (update.docChanged || update.viewportChanged) {
+			// selectionSet is included so the "[" reveal-near-cursor
+			// decoration (see buildDecorations) tracks the cursor moving
+			// in and out of a title, not just doc/viewport changes.
+			if (
+				update.docChanged ||
+				update.viewportChanged ||
+				update.selectionSet
+			) {
 				const built = buildDecorations(update.view);
 				this.decorations = built.decorations;
 				this.atomic = built.atomic;
@@ -454,7 +581,10 @@ const MOD_HELD_CLASS = "link-hover-reveal-mod-held";
 
 export default class LinkHoverRevealPlugin extends Plugin {
 	async onload() {
-		this.registerEditorExtension(Prec.highest(linkHoverRevealViewPlugin));
+		this.registerEditorExtension([
+			Prec.highest(linkHoverRevealViewPlugin),
+			Prec.highest(keymap.of(linkBoundaryKeymap)),
+		]);
 
 		// A real Obsidian command (not a CM6 keymap) so it shows up in
 		// Settings → Hotkeys and users can freely rebind it. CM6 keymaps

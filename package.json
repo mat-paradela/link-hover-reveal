@@ -1,6 +1,6 @@
 {
   "name": "link-hover-reveal",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Obsidian plugin: keeps markdown link titles editable while hiding the [ ] ( ) syntax, with a hover popup to copy, open, or edit the URL.",
   "main": "main.js",
   "scripts": {

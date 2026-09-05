@@ -11,7 +11,7 @@ body.link-hover-reveal-mod-held .link-hover-reveal-title {
 .link-hover-reveal-popup {
 	position: fixed;
 	z-index: var(--layer-popover, 70);
-	display: flex;
+	display: none;
 	align-items: center;
 	gap: 2px;
 	padding: 4px 6px;
@@ -20,6 +20,10 @@ body.link-hover-reveal-mod-held .link-hover-reveal-title {
 	border-radius: var(--radius-m, 6px);
 	box-shadow: var(--shadow-s);
 	font-size: var(--font-ui-smaller);
+}
+
+.link-hover-reveal-popup.is-visible {
+	display: flex;
 }
 
 .link-hover-reveal-popup-url {

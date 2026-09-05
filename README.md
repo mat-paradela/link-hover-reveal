@@ -13,7 +13,11 @@ By default, Obsidian's Live Preview expands a markdown link to its raw `[text](u
 - The `[`, `]`, `(url)` syntax stays hidden at all times; the cursor skips over it instead of landing inside, so navigating between lines never expands a link.
 - Clicking the title places the cursor, like normal text; **Cmd/Ctrl-click** opens the link.
 - Hover a link (after a brief delay) to see a small popup below it with the truncated URL and three actions: copy, open, and edit.
-- **Edit link at cursor** command (default hotkey `Cmd/Ctrl+Shift+K`, rebindable in Settings → Hotkeys) opens the same popup straight into edit mode, from the keyboard, no mouse needed.
+- **Edit link at cursor** command opens the same popup straight into edit mode, from the keyboard, no mouse needed. It ships without a default hotkey — assign one in Settings → Hotkeys.
+
+## Privacy
+
+The plugin makes no network requests and stores no data. It writes to the system clipboard only when you click the popup's copy button, and only the URL of the link you copied; it never reads the clipboard.
 
 ## Installation
 

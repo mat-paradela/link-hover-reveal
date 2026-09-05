@@ -263,7 +263,6 @@ class LinkPopup {
 		this.actionsEl = this.el.createDiv({
 			cls: "link-hover-reveal-popup-actions",
 		});
-		this.el.style.display = "none";
 		document.body.appendChild(this.el);
 
 		this.buildActions();
@@ -280,10 +279,12 @@ class LinkPopup {
 		});
 		setIcon(copyBtn, "copy");
 		copyBtn.setAttribute("aria-label", "Copy link");
-		copyBtn.addEventListener("click", async () => {
+		copyBtn.addEventListener("click", () => {
 			if (!this.current) return;
-			await navigator.clipboard.writeText(this.current.url);
-			new Notice("Link copied");
+			// The URL only ever leaves the plugin on an explicit click here.
+			void navigator.clipboard
+				.writeText(this.current.url)
+				.then(() => new Notice("Link copied"));
 		});
 
 		const openBtn = this.actionsEl.createEl("button", {
@@ -349,9 +350,11 @@ show(trigger: HTMLElement, data: LinkData) {
 		this.current = data;
 		this.renderDisplay();
 
-		this.el.style.left = `${rect.left}px`;
-		this.el.style.top = `${rect.bottom + 4}px`;
-		this.el.style.display = "flex";
+		this.el.setCssStyles({
+			left: `${rect.left}px`,
+			top: `${rect.bottom + 4}px`,
+		});
+		this.el.addClass("is-visible");
 	}
 
 	scheduleHide() {
@@ -361,7 +364,7 @@ show(trigger: HTMLElement, data: LinkData) {
 
 		this.cancelHide();
 		this.hideTimer = window.setTimeout(() => {
-			this.el.style.display = "none";
+			this.el.removeClass("is-visible");
 			this.current = null;
 		}, 200);
 	}
@@ -470,9 +473,9 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 		private showTimer: number | null = null;
 
 		private onMouseOver = (evt: MouseEvent) => {
-			const target = (evt.target as HTMLElement)?.closest?.(
-				`.${TITLE_CLASS}`
-			) as HTMLElement | null;
+			const target: HTMLElement | null | undefined = (
+				evt.target as HTMLElement
+			)?.closest?.(`.${TITLE_CLASS}`);
 			if (!target || this.showTimer !== null) return;
 
 			const from = Number(target.dataset.lhrFrom);
@@ -506,9 +509,9 @@ const linkHoverRevealViewPlugin = ViewPlugin.fromClass(
 		// click-to-open-link handling, so we can reliably own the event
 		// regardless of where else it's listened to.
 		private onCaptureMouseDown = (evt: MouseEvent) => {
-			const target = (evt.target as HTMLElement)?.closest?.(
-				`.${TITLE_CLASS}`
-			) as HTMLElement | null;
+			const target: HTMLElement | null | undefined = (
+				evt.target as HTMLElement
+			)?.closest?.(`.${TITLE_CLASS}`);
 			if (!target) return;
 
 			const url = target.dataset.lhrUrl;
@@ -627,14 +630,12 @@ export default class LinkHoverRevealPlugin extends Plugin {
 		]);
 
 		// A real Obsidian command (not a CM6 keymap) so it shows up in
-		// Settings → Hotkeys and users can freely rebind it. CM6 keymaps
-		// can't reliably win against Obsidian's own built-in hotkeys
-		// (e.g. the default Mod-K is already "insert link"), so this uses
-		// a separate default combo instead of fighting over that one.
+		// Settings → Hotkeys and users can bind it to whatever they want.
+		// No default hotkey on purpose: anything we picked could collide
+		// with an existing user or built-in binding.
 		this.addCommand({
 			id: "edit-link-at-cursor",
 			name: "Edit link at cursor",
-			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "k" }],
 			editorCheckCallback: (checking, editor) => {
 				const cmView = (editor as Editor & { cm?: EditorView }).cm;
 				const instance = cmView?.plugin(linkHoverRevealViewPlugin);
